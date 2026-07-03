@@ -2,25 +2,27 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
-    "moduleResolution": "bundler",
-    "jsx": "react",
-    "jsxImportSource": "react",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
-    "noEmit": true,
+    "noImplicitAny": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "noEmit": false,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["bun-types", "@types/node"]
+    "types": ["node"]
   },
   "include": [
     "*.ts",
     "core/**/*.ts",
+    "ui/**/*.ts",
     "ui/**/*.tsx",
-    "ui/**/*.ts"
+    "types/**/*.d.ts"
   ],
   "exclude": [
     "node_modules",

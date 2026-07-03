@@ -26,9 +26,7 @@ import { useReviewState } from "./App.tsx";
 // ---------------------------------------------------------------------------
 // CodeMirror 6 type stubs (minimal — avoids needing @codemirror/* type packages)
 // ---------------------------------------------------------------------------
-interface CMExtension {
-  // opaque
-}
+type CMExtension = object;
 
 interface CMEditorState {
   doc: {
@@ -360,7 +358,6 @@ export function LatexPane() {
       }
     };
     // Only run once on mount — content updates happen via dispatch below
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Update editor content when texContent changes ──────────────────────

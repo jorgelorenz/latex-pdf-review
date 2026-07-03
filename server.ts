@@ -1,171 +1,86 @@
-/**
- * server.ts
- *
- * Local Bun HTTP server that powers the latex-pdf-review UI.
- * Serves the split-pane browser UI and exposes a JSON API for:
- *   - SyncTeX forward sync (PDF → LaTeX)
- *   - SyncTeX reverse sync (LaTeX → PDF)
- *   - Review submission (injects prompt into OpenCode session)
- *   - Annotation CRUD (in-memory for MVP)
- *   - Static file serving (UI assets)
- *
- * The server is started by plugin.ts when the user runs /latex-pdf-review,
- * receives the OpenCode client + sessionId, and holds them for the lifetime
- * of the review session.
- */
-
-import { readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { join, dirname, resolve, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import * as esbuild from "esbuild";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { synctexEdit } from "./core/synctex.ts";
 import { synctexView } from "./core/reverseSync.ts";
 import { extractLatexContext, readTexFile } from "./core/context.ts";
 import { buildAnnotationPrompt } from "./core/prompt.ts";
 import type {
   Annotation,
-  SynctexEditRequest,
-  SynctexViewRequest,
-  AnnotationSubmitRequest,
   AnnotationSubmitResponse,
-  BatchAnnotationSubmitRequest,
-  BatchAnnotationSubmitResponse,
   ConfigResponse,
-  FileReadResponse,
   ErrorResponse,
+  FileReadResponse,
   FileSaveRequest,
   FileSaveResponse,
   RecompileResponse,
+  SynctexEditRequest,
+  SynctexViewRequest,
   UiStatusResponse,
 } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
-
-// ---------------------------------------------------------------------------
-// UI bundle cache (esbuild result, built once per server process)
-// ---------------------------------------------------------------------------
-let cachedUiBundle: string | null = null;
-
-/**
- * Build the UI React app bundle using esbuild.
- * All TSX/TS files are transpiled and bundled into a single ESM file.
- * React is kept as an external (loaded from CDN via importmap in index.html).
- */
-async function buildUiBundle(uiDirectory: string): Promise<string> {
-  if (cachedUiBundle !== null) {
-    console.log("[buildUiBundle] Returning cached bundle");
-    return cachedUiBundle;
-  }
-
-  const entrypoint = join(uiDirectory, "App.tsx");
-  console.log("[buildUiBundle] Starting esbuild with entrypoint:", entrypoint);
-  
-  try {
-    const result = await esbuild.build({
-      entryPoints: [entrypoint],
-      target: "es2020",
-      format: "esm",
-      bundle: true,
-      minify: true,
-      external: [
-        "react",
-        "react-dom",
-        "react-dom/client",
-      ],
-      write: false,
-      logLevel: "info",
-    });
-
-    if (!result.outputFiles || result.outputFiles.length === 0) {
-      throw new Error("esbuild produced no output files");
-    }
-
-    cachedUiBundle = new TextDecoder().decode(result.outputFiles[0].contents);
-    console.log("[buildUiBundle] Bundle built successfully, size:", cachedUiBundle.length, "bytes");
-    return cachedUiBundle;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[buildUiBundle] Build failed:", msg, err);
-    throw new Error(`UI bundle build failed: ${msg}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Server configuration
-// ---------------------------------------------------------------------------
+const BunRuntime = globalThis.Bun as any;
 
 export interface ServerOptions {
-  /** Absolute path to the PDF file being reviewed */
   pdfPath: string;
-  /** The project root directory */
   directory: string;
-  /** OpenCode session ID to inject prompts into */
   sessionId: string;
-  /**
-   * OpenCode SDK client — used to call session.prompt() and tui.showToast()
-   * Typed as `any` to avoid hard dependency on @opencode-ai/sdk at runtime;
-   * the plugin.ts passes the live client from the plugin context.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  client: any;
+  client: {
+    session: { prompt: (...args: any[]) => unknown };
+    tui?: { showToast?: (...args: any[]) => unknown };
+  };
 }
 
 export interface StartedServer {
-  /** URL the server is listening on */
   url: string;
-  /** Call to shut down the server */
+  browserUrl: string;
+  sessionToken: string;
   close: () => void;
 }
 
-// ---------------------------------------------------------------------------
-// In-memory annotation store (per server instance)
-// ---------------------------------------------------------------------------
-
-const annotations: Annotation[] = [];
-let reviewSubmitted = false; // Flag set when submit-batch completes
-let pdfVersion = 1;
-let isCompiling = false;
-let isAgentBusy = false;
-let compilePromise: Promise<number> | null = null;
-
-// ---------------------------------------------------------------------------
-// UI directory resolution
-// ---------------------------------------------------------------------------
-
-/** Resolve path to the ui/ directory next to this file */
-function uiDir(): string {
-  // Works for both Bun (import.meta.url) and Node
-  try {
-    return join(dirname(fileURLToPath(import.meta.url)), "ui");
-  } catch {
-    return join(process.cwd(), "plugins", "latex-pdf-review", "ui");
-  }
+interface ServerState {
+  annotations: Annotation[];
+  reviewSubmitted: boolean;
+  pdfVersion: number;
+  isCompiling: boolean;
+  isAgentBusy: boolean;
+  compilePromise: Promise<number> | null;
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+const STATIC_CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+};
 
-/**
- * Start the local HTTP server.
- * Binds to a random available port on 127.0.0.1.
- */
 export async function startServer(opts: ServerOptions): Promise<StartedServer> {
-  // Find a free port
   const port = await findFreePort(7200);
+  const uiDirectory = resolveUiDirectory();
+  const sessionToken = createSessionToken();
+  const state: ServerState = {
+    annotations: [],
+    reviewSubmitted: false,
+    pdfVersion: 1,
+    isCompiling: false,
+    isAgentBusy: false,
+    compilePromise: null,
+  };
 
-  // Build the Bun server
-  const server = Bun.serve({
+  const server = BunRuntime?.serve({
     port,
     hostname: "127.0.0.1",
-    async fetch(req) {
-      return handleRequest(req, opts, port);
-    },
+    fetch: (req) => handleRequest(req, opts, state, uiDirectory, sessionToken, port),
     error(err) {
-      console.error("[latex-pdf-review] server error:", err);
       return new Response(JSON.stringify({ error: err.message }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
@@ -173,40 +88,49 @@ export async function startServer(opts: ServerOptions): Promise<StartedServer> {
     },
   });
 
-  const url = `http://127.0.0.1:${port}`;
   return {
-    url,
+    url: `http://127.0.0.1:${port}`,
+    browserUrl: `http://127.0.0.1:${port}/?session=${encodeURIComponent(sessionToken)}`,
+    sessionToken,
     close: () => server.stop(true),
   };
 }
 
-// ---------------------------------------------------------------------------
-// Request router
-// ---------------------------------------------------------------------------
-
 async function handleRequest(
   req: Request,
   opts: ServerOptions,
+  state: ServerState,
+  uiDirectory: string,
+  sessionToken: string,
   port: number
 ): Promise<Response> {
   const url = new URL(req.url);
-  const path = url.pathname;
+  const path = normalizeUrlPath(url.pathname);
   const method = req.method.toUpperCase();
 
-  // CORS headers for dev convenience (UI and server are same origin, but just in case)
-  const corsHeaders = {
+  const baseHeaders: Record<string, string> = {
     "Access-Control-Allow-Origin": `http://127.0.0.1:${port}`,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-Latex-Review-Session",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
   };
 
   if (method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
+    return new Response(null, { status: 204, headers: baseHeaders });
+  }
+
+  const isPublicRoute =
+    path === "/" ||
+    path === "/index.html" ||
+    path === "/app.js" ||
+    path === "/favicon.ico" ||
+    path.startsWith("/assets/");
+  if (!isPublicRoute && !isAuthorizedRequest(req, sessionToken, url)) {
+    return errorResponse("Unauthorized request", 401, baseHeaders);
   }
 
   try {
-    // ---- API routes --------------------------------------------------------
-
     if (path === "/api/config" && method === "GET") {
       return jsonResponse<ConfigResponse>(
         {
@@ -214,403 +138,358 @@ async function handleRequest(
           directory: opts.directory,
           sessionId: opts.sessionId,
         },
-        corsHeaders
+        baseHeaders
       );
     }
 
     if (path === "/api/file" && method === "GET") {
       const filePath = url.searchParams.get("path");
-      if (!filePath) {
-        return errorResponse("Missing ?path= query parameter", 400, corsHeaders);
+      if (!filePath) return errorResponse("Missing ?path= query parameter", 400, baseHeaders);
+
+      const absPath = resolveWorkspacePath(filePath, opts.directory);
+      if (extname(absPath).toLowerCase() !== ".tex") {
+        return errorResponse("Only .tex files are allowed", 400, baseHeaders);
       }
-      const absPath = resolveFilePath(filePath, opts.directory);
-      if (!existsSync(absPath)) {
-        return errorResponse(`File not found: ${absPath}`, 404, corsHeaders);
-      }
+      if (!existsSync(absPath)) return errorResponse(`File not found: ${absPath}`, 404, baseHeaders);
+
       const content = await readTexFile(absPath);
-      return jsonResponse<FileReadResponse>({ path: absPath, content }, corsHeaders);
+      return jsonResponse<FileReadResponse>({ path: absPath, content }, baseHeaders);
     }
 
     if (path === "/api/file/save" && method === "POST") {
-      const body = (await req.json()) as FileSaveRequest;
-      const filePath = body.path;
-      const content = body.content;
-      if (!filePath || typeof content !== "string") {
-        return errorResponse("Missing required fields: path, content", 400, corsHeaders);
+      const body = await parseJsonBody<FileSaveRequest>(req);
+      if (!body.path || typeof body.content !== "string") {
+        return errorResponse("Missing required fields: path, content", 400, baseHeaders);
       }
-      const absPath = resolveFilePath(filePath, opts.directory);
-      if (!existsSync(absPath)) {
-        return errorResponse(`File not found: ${absPath}`, 404, corsHeaders);
+
+      const absPath = resolveWorkspacePath(body.path, opts.directory);
+      if (extname(absPath).toLowerCase() !== ".tex") {
+        return errorResponse("Only .tex files can be saved", 400, baseHeaders);
       }
-      await writeFile(absPath, content, "utf-8");
-      return jsonResponse<FileSaveResponse>({ ok: true, path: absPath }, corsHeaders);
+      if (!existsSync(absPath)) return errorResponse(`File not found: ${absPath}`, 404, baseHeaders);
+
+      await writeFile(absPath, body.content, "utf-8");
+      return jsonResponse<FileSaveResponse>({ ok: true, path: absPath }, baseHeaders);
     }
 
     if (path === "/api/compile" && method === "POST") {
-      const nextVersion = await enqueueCompile(opts.pdfPath);
-      return jsonResponse<RecompileResponse>(
-        {
-          ok: true,
-          pdfVersion: nextVersion,
-        },
-        corsHeaders
-      );
+      const nextVersion = await enqueueCompile(opts.pdfPath, state);
+      return jsonResponse<RecompileResponse>({ ok: true, pdfVersion: nextVersion }, baseHeaders);
     }
 
     if (path === "/api/agent/busy" && method === "POST") {
-      const body = (await req.json()) as { busy?: boolean };
-      isAgentBusy = Boolean(body?.busy);
-      return jsonResponse({ ok: true, isAgentBusy }, corsHeaders);
+      const body = await parseJsonBody<{ busy?: boolean }>(req);
+      state.isAgentBusy = Boolean(body.busy);
+      return jsonResponse({ ok: true, isAgentBusy: state.isAgentBusy }, baseHeaders);
     }
 
     if (path === "/api/status" && method === "GET") {
       return jsonResponse<UiStatusResponse>(
         {
-          pdfVersion,
-          isCompiling,
-          isAgentBusy,
+          pdfVersion: state.pdfVersion,
+          isCompiling: state.isCompiling,
+          isAgentBusy: state.isAgentBusy,
         },
-        corsHeaders
+        baseHeaders
       );
     }
 
     if (path === "/api/synctex/edit" && method === "POST") {
-      const body = (await req.json()) as SynctexEditRequest;
-      const { pdfFile, page, x, y } = body;
-      if (!pdfFile || page == null || x == null || y == null) {
-        return errorResponse("Missing required fields: pdfFile, page, x, y", 400, corsHeaders);
+      const body = await parseJsonBody<SynctexEditRequest>(req);
+      if (!body.pdfFile || !isPositiveNumber(body.page) || !isFiniteNumber(body.x) || !isFiniteNumber(body.y)) {
+        return errorResponse("Missing or invalid fields: pdfFile, page, x, y", 400, baseHeaders);
       }
-      const absPdf = resolveFilePath(pdfFile, opts.directory);
-      const result = await synctexEdit(absPdf, page, x, y);
-      return jsonResponse(result, corsHeaders);
+
+      const absPdf = resolveWorkspacePath(body.pdfFile, opts.directory);
+      if (extname(absPdf).toLowerCase() !== ".pdf") {
+        return errorResponse("pdfFile must point to a .pdf file", 400, baseHeaders);
+      }
+      const result = await synctexEdit(absPdf, body.page, body.x, body.y);
+      return jsonResponse(result, baseHeaders);
     }
 
     if (path === "/api/synctex/view" && method === "POST") {
-      const body = (await req.json()) as SynctexViewRequest;
-      const { texFile, line, pdfFile } = body;
-      if (!texFile || line == null || !pdfFile) {
-        return errorResponse("Missing required fields: texFile, line, pdfFile", 400, corsHeaders);
+      const body = await parseJsonBody<SynctexViewRequest>(req);
+      if (!body.texFile || !isPositiveNumber(body.line) || !body.pdfFile) {
+        return errorResponse("Missing or invalid fields: texFile, line, pdfFile", 400, baseHeaders);
       }
-      const absTeX = resolveFilePath(texFile, opts.directory);
-      const absPdf = resolveFilePath(pdfFile, opts.directory);
-      const result = await synctexView(absTeX, line, absPdf);
-      // null is a valid response (no match found — UI handles gracefully)
-      return jsonResponse(result ?? null, corsHeaders);
+
+      const absTeX = resolveWorkspacePath(body.texFile, opts.directory);
+      const absPdf = resolveWorkspacePath(body.pdfFile, opts.directory);
+      if (extname(absTeX).toLowerCase() !== ".tex") {
+        return errorResponse("texFile must point to a .tex file", 400, baseHeaders);
+      }
+      if (extname(absPdf).toLowerCase() !== ".pdf") {
+        return errorResponse("pdfFile must point to a .pdf file", 400, baseHeaders);
+      }
+      const result = await synctexView(absTeX, body.line, absPdf);
+      return jsonResponse(result ?? null, baseHeaders);
     }
 
     if (path === "/api/annotations" && method === "GET") {
-      return jsonResponse(annotations, corsHeaders);
+      return jsonResponse(state.annotations, baseHeaders);
     }
 
     if (path === "/api/annotations" && method === "POST") {
-      const body = (await req.json()) as { annotation: Annotation };
+      const body = await parseJsonBody<{ annotation?: Annotation }>(req);
       const annotation = body.annotation;
-      if (!annotation?.id) {
-        return errorResponse("Invalid annotation object", 400, corsHeaders);
+      if (!annotation || !annotation.id) {
+        return errorResponse("Invalid annotation object", 400, baseHeaders);
       }
-      // Upsert (replace if same id)
-      const idx = annotations.findIndex((a) => a.id === annotation.id);
-      if (idx >= 0) {
-        annotations[idx] = annotation;
-      } else {
-        annotations.push(annotation);
-      }
-      return jsonResponse({ ok: true }, corsHeaders);
+
+      const idx = state.annotations.findIndex((a) => a.id === annotation.id);
+      if (idx >= 0) state.annotations[idx] = annotation;
+      else state.annotations.push(annotation);
+
+      return jsonResponse({ ok: true }, baseHeaders);
     }
 
     if (path === "/api/review/submit" && method === "POST") {
-      const body = (await req.json()) as AnnotationSubmitRequest;
+      const body = await parseJsonBody<{ annotation?: Annotation }>(req);
       const annotation = body.annotation;
-      if (!annotation) {
-        return errorResponse("Missing annotation in request body", 400, corsHeaders);
-      }
+      if (!annotation) return errorResponse("Missing annotation in request body", 400, baseHeaders);
 
-      isAgentBusy = true;
+      state.isAgentBusy = true;
       try {
-        // 1. Extract LaTeX context
-        const absTeX = resolveFilePath(annotation.texFile, opts.directory);
+        const absTeX = resolveWorkspacePath(annotation.texFile, opts.directory);
         const context = await extractLatexContext(absTeX, annotation.texLine);
-
-        // 2. Build the review prompt
         const prompt = buildAnnotationPrompt(annotation, context);
 
-        // 3. Inject into OpenCode session (no external API — uses the live client)
         await opts.client.session.prompt({
           path: { id: opts.sessionId },
-          body: {
-            parts: [{ type: "text", text: prompt }],
-          },
+          body: { parts: [{ type: "text", text: prompt }] },
         });
 
-        // 4. Update annotation status in store
-        const idx = annotations.findIndex((a) => a.id === annotation.id);
+        const idx = state.annotations.findIndex((a) => a.id === annotation.id);
         const updated: Annotation = { ...annotation, reviewStatus: "submitted" };
-        if (idx >= 0) {
-          annotations[idx] = updated;
-        } else {
-          annotations.push(updated);
-        }
+        if (idx >= 0) state.annotations[idx] = updated;
+        else state.annotations.push(updated);
 
-        // 5. Surface a toast in the TUI
-        try {
-          await opts.client.tui.showToast({
-            body: {
-              message: `Review submitted for ${annotation.texFile}:${annotation.texLine}`,
-              variant: "success",
-            },
-          });
-        } catch {
-          // Toast failure is non-fatal
-        }
-
-        return jsonResponse<AnnotationSubmitResponse>(
-          { ok: true, prompt },
-          corsHeaders
-        );
+        await maybeShowToast(opts.client, `Review submitted for ${annotation.texFile}:${annotation.texLine}`, "success");
+        return jsonResponse<AnnotationSubmitResponse>({ ok: true, prompt }, baseHeaders);
       } catch (err: unknown) {
-        isAgentBusy = false;
+        state.isAgentBusy = false;
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`Failed to submit review: ${msg}`);
       }
     }
 
-    // Batch submission — submit all pending annotations at once
     if (path === "/api/review/submit-batch" && method === "POST") {
-      const body = (await req.json()) as { annotations: Annotation[] };
+      const body = await parseJsonBody<{ annotations?: Annotation[] }>(req);
       const anns = body.annotations;
       if (!Array.isArray(anns) || anns.length === 0) {
-        return errorResponse("Missing or empty annotations array", 400, corsHeaders);
+        return errorResponse("Missing or empty annotations array", 400, baseHeaders);
       }
 
-      isAgentBusy = true;
+      state.isAgentBusy = true;
       try {
-        // Build a combined prompt for all annotations
         const prompts: string[] = [];
         for (const annotation of anns) {
-          const absTeX = resolveFilePath(annotation.texFile, opts.directory);
+          const absTeX = resolveWorkspacePath(annotation.texFile, opts.directory);
           const context = await extractLatexContext(absTeX, annotation.texLine);
-          const prompt = buildAnnotationPrompt(annotation, context);
-          prompts.push(prompt);
+          prompts.push(buildAnnotationPrompt(annotation, context));
         }
         const combinedPrompt = prompts.join("\n\n---\n\n");
 
-        // Inject combined prompt into OpenCode session
         await opts.client.session.prompt({
           path: { id: opts.sessionId },
-          body: {
-            parts: [{ type: "text", text: combinedPrompt }],
-          },
+          body: { parts: [{ type: "text", text: combinedPrompt }] },
         });
 
-        // Update all annotations in store
         for (const annotation of anns) {
-          const idx = annotations.findIndex((a) => a.id === annotation.id);
+          const idx = state.annotations.findIndex((a) => a.id === annotation.id);
           const updated: Annotation = { ...annotation, reviewStatus: "submitted" };
-          if (idx >= 0) {
-            annotations[idx] = updated;
-          } else {
-            annotations.push(updated);
-          }
+          if (idx >= 0) state.annotations[idx] = updated;
+          else state.annotations.push(updated);
         }
 
-        // Show toast
-        try {
-          await opts.client.tui.showToast({
-            body: {
-              message: `${anns.length} reviews submitted to agent`,
-              variant: "success",
-            },
-          });
-        } catch {
-          // Toast failure is non-fatal
-        }
-
-        // Mark that submission occurred
-        reviewSubmitted = true;
-
-        return jsonResponse<BatchAnnotationSubmitResponse>(
-          { ok: true, prompt: combinedPrompt, count: anns.length },
-          corsHeaders
-        );
+        state.reviewSubmitted = true;
+        await maybeShowToast(opts.client, `${anns.length} reviews submitted to agent`, "success");
+        return jsonResponse({ ok: true, prompt: combinedPrompt, count: anns.length }, baseHeaders);
       } catch (err: unknown) {
-        isAgentBusy = false;
+        state.isAgentBusy = false;
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`Failed to submit review batch: ${msg}`);
       }
     }
 
-    // Check if a review was recently submitted (for plugin polling)
     if (path === "/api/review/submitted" && method === "GET") {
-      const submitted = reviewSubmitted;
-      reviewSubmitted = false; // Reset flag
-      return jsonResponse({ submitted }, corsHeaders);
+      const submitted = state.reviewSubmitted;
+      state.reviewSubmitted = false;
+      return jsonResponse({ submitted }, baseHeaders);
     }
-
-    // ---- PDF binary serving (for PDF.js) ------------------------------------
 
     if (path === "/pdf" && method === "GET") {
       const filePath = url.searchParams.get("path");
-      if (!filePath) {
-        return errorResponse("Missing ?path= query parameter", 400, corsHeaders);
+      if (!filePath) return errorResponse("Missing ?path= query parameter", 400, baseHeaders);
+
+      const absPath = resolveWorkspacePath(filePath, opts.directory);
+      if (extname(absPath).toLowerCase() !== ".pdf") {
+        return errorResponse("Only .pdf files are allowed", 400, baseHeaders);
       }
-      const absPath = resolveFilePath(filePath, opts.directory);
-      if (!existsSync(absPath)) {
-        return errorResponse(`PDF not found: ${absPath}`, 404, corsHeaders);
-      }
+      if (!existsSync(absPath)) return errorResponse(`PDF not found: ${absPath}`, 404, baseHeaders);
+
       const pdfBytes = await readFile(absPath);
       return new Response(pdfBytes, {
+        status: 200,
         headers: {
+          ...baseHeaders,
           "Content-Type": "application/pdf",
           "Content-Length": String(pdfBytes.byteLength),
-          "Cache-Control": "no-store, must-revalidate",
-          ETag: `W/\"pdf-${pdfVersion}\"`,
-          // Allow PDF.js to load it cross-origin (same origin actually, but safe)
-          "Access-Control-Allow-Origin": "*",
+          ETag: `W/"pdf-${state.pdfVersion}"`,
         },
       });
     }
 
-    // ---- Static files (UI) -------------------------------------------------
-
-    // Favicon — return 204 No Content to avoid 404 errors
     if (path === "/favicon.ico") {
-      return new Response(null, { status: 204 });
+      return new Response(null, { status: 204, headers: baseHeaders });
     }
 
     if (path === "/" || path === "/index.html") {
-      const htmlPath = join(uiDir(), "index.html");
-      const html = await readFile(htmlPath, "utf-8");
+      const html = await readFile(join(uiDirectory, "index.html"), "utf-8");
       return new Response(html, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
+        status: 200,
+        headers: { ...baseHeaders, "Content-Type": "text/html; charset=utf-8" },
       });
     }
 
-    // /app.js — dynamically bundle the React UI with Bun's native bundler.
-    // On first request this takes ~500ms; subsequent requests use the cache.
     if (path === "/app.js") {
-      try {
-        const bundle = await buildUiBundle(uiDir());
-        return new Response(bundle, {
-          headers: {
-            "Content-Type": "application/javascript",
-            "Cache-Control": "no-cache",
-          },
-        });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return errorResponse(`UI bundle build failed: ${msg}`, 500, corsHeaders);
-      }
-    }
-
-    // Serve other static assets from ui/
-    const staticPath = join(uiDir(), path.slice(1));
-    if (existsSync(staticPath)) {
-      const content = await readFile(staticPath);
-      return new Response(content, {
-        headers: { "Content-Type": guessContentType(path) },
+      const js = await readFile(join(uiDirectory, "app.js"), "utf-8");
+      return new Response(js, {
+        status: 200,
+        headers: { ...baseHeaders, "Content-Type": "application/javascript; charset=utf-8" },
       });
     }
 
-    return errorResponse(`Not found: ${path}`, 404, corsHeaders);
+    const staticFilePath = resolveStaticAssetPath(path, uiDirectory);
+    if (staticFilePath && existsSync(staticFilePath)) {
+      const content = await readFile(staticFilePath);
+      const type = STATIC_CONTENT_TYPES[extname(staticFilePath).toLowerCase()] ?? "application/octet-stream";
+      return new Response(content, {
+        status: 200,
+        headers: { ...baseHeaders, "Content-Type": type },
+      });
+    }
+
+    return errorResponse(`Not found: ${path}`, 404, baseHeaders);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[latex-pdf-review] ${method} ${path} error:`, message);
-    return errorResponse(message, 500, corsHeaders);
+    return errorResponse(message, 500, baseHeaders);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function jsonResponse<T>(
-  data: T,
-  extraHeaders: Record<string, string> = {}
-): Response {
-  return new Response(JSON.stringify(data, null, 2), {
+function jsonResponse<T>(data: T, extraHeaders: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(data), {
     status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      ...extraHeaders,
-    },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
   });
 }
 
-function errorResponse(
-  message: string,
-  status: number,
-  extraHeaders: Record<string, string> = {}
-): Response {
+function errorResponse(message: string, status: number, extraHeaders: Record<string, string> = {}): Response {
   const body: ErrorResponse = { error: message };
   return new Response(JSON.stringify(body), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      ...extraHeaders,
-    },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
   });
 }
 
-/**
- * Resolve a file path that may be absolute or relative to the project directory.
- */
-function resolveFilePath(filePath: string, directory: string): string {
-  if (isAbsolute(filePath)) return filePath;
-  return resolve(directory, filePath);
+function normalizeUrlPath(pathname: string): string {
+  if (!pathname.startsWith("/")) return "/";
+  return pathname.replace(/\/{2,}/g, "/");
 }
 
-/**
- * Find a free TCP port starting from `startPort`.
- */
-async function findFreePort(startPort: number): Promise<number> {
-  for (let port = startPort; port < startPort + 100; port++) {
-    try {
-      // Try to bind a temporary server — if it succeeds the port is free
-      const tmp = Bun.serve({
-        port,
-        hostname: "127.0.0.1",
-        fetch: () => new Response("ok"),
-      });
-      tmp.stop(true);
-      return port;
-    } catch {
-      // Port busy, try next
-    }
+function resolveWorkspacePath(inputPath: string, workspaceDir: string): string {
+  const candidate = isAbsolute(inputPath) ? resolve(inputPath) : resolve(workspaceDir, inputPath);
+  if (!isPathInside(candidate, workspaceDir)) {
+    throw new Error("Requested path is outside the workspace directory");
   }
-  throw new Error(`No free port found in range ${startPort}–${startPort + 99}`);
+  return candidate;
 }
 
-function guessContentType(path: string): string {
-  if (path.endsWith(".js") || path.endsWith(".mjs")) return "application/javascript";
-  if (path.endsWith(".ts") || path.endsWith(".tsx")) return "application/javascript";
-  if (path.endsWith(".css")) return "text/css";
-  if (path.endsWith(".html")) return "text/html";
-  if (path.endsWith(".json")) return "application/json";
-  if (path.endsWith(".svg")) return "image/svg+xml";
-  if (path.endsWith(".png")) return "image/png";
-  if (path.endsWith(".ico")) return "image/x-icon";
-  return "application/octet-stream";
+function isPathInside(candidatePath: string, rootPath: string): boolean {
+  const candidate = resolve(candidatePath);
+  const root = resolve(rootPath);
+  const maybeLowerCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+  const maybeLowerRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  if (maybeLowerCandidate === maybeLowerRoot) return true;
+
+  const separator = maybeLowerRoot.endsWith("/") || maybeLowerRoot.endsWith("\\") ? "" : process.platform === "win32" ? "\\" : "/";
+  return maybeLowerCandidate.startsWith(maybeLowerRoot + separator);
 }
 
-async function enqueueCompile(pdfPath: string): Promise<number> {
-  if (compilePromise) {
-    return compilePromise;
+function createSessionToken(): string {
+  return randomBytes(24).toString("hex");
+}
+
+function isAuthorizedRequest(req: Request, sessionToken: string, url: URL): boolean {
+  const fromHeader = req.headers.get("x-latex-review-session");
+  const fromQuery = url.searchParams.get("session");
+  return fromHeader === sessionToken || fromQuery === sessionToken;
+}
+
+async function parseJsonBody<T>(req: Request): Promise<T> {
+  const contentType = req.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error("Expected application/json request body");
   }
+  return (await req.json()) as T;
+}
 
-  compilePromise = runCompile(pdfPath)
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function resolveUiDirectory(): string {
+  const runtimeDir = dirname(fileURLToPath(import.meta.url));
+  const candidate = join(runtimeDir, "ui");
+  if (!existsSync(candidate)) {
+    throw new Error(`UI assets directory is missing: ${candidate}`);
+  }
+  return candidate;
+}
+
+function resolveStaticAssetPath(requestPath: string, uiDirectory: string): string | null {
+  if (!requestPath.startsWith("/")) return null;
+  const relativePath = requestPath.slice(1);
+  if (!relativePath || relativePath.includes("..") || relativePath.includes("\\")) return null;
+  const fullPath = resolve(uiDirectory, relativePath);
+  if (!isPathInside(fullPath, uiDirectory)) return null;
+  return fullPath;
+}
+
+async function maybeShowToast(
+  client: ServerOptions["client"],
+  message: string,
+  variant: "success" | "error" | "info"
+): Promise<void> {
+  try {
+    await client.tui?.showToast?.({ body: { message, variant } });
+  } catch {
+    // non-fatal
+  }
+}
+
+async function enqueueCompile(pdfPath: string, state: ServerState): Promise<number> {
+  if (state.compilePromise) return state.compilePromise;
+
+  state.compilePromise = runCompile(pdfPath, state)
     .then((version) => {
-      compilePromise = null;
+      state.compilePromise = null;
       return version;
     })
     .catch((err) => {
-      compilePromise = null;
+      state.compilePromise = null;
       throw err;
     });
 
-  return compilePromise;
+  return state.compilePromise;
 }
 
-async function runCompile(pdfPath: string): Promise<number> {
+async function runCompile(pdfPath: string, state: ServerState): Promise<number> {
   const pdfDir = dirname(pdfPath);
   const pdfName = pdfPath.split(/[\\/]/).pop() ?? "main.pdf";
   const texName = pdfName.replace(/\.pdf$/i, ".tex");
@@ -621,7 +500,7 @@ async function runCompile(pdfPath: string): Promise<number> {
     throw new Error(`Source .tex not found for PDF: ${texPath}`);
   }
 
-  isCompiling = true;
+  state.isCompiling = true;
   try {
     let lastErrorMessage = "Compilation failed";
     let compiledOk = false;
@@ -665,10 +544,10 @@ async function runCompile(pdfPath: string): Promise<number> {
       throw new Error(lastErrorMessage);
     }
 
-    pdfVersion += 1;
-    return pdfVersion;
+    state.pdfVersion += 1;
+    return state.pdfVersion;
   } finally {
-    isCompiling = false;
+    state.isCompiling = false;
   }
 }
 
@@ -676,15 +555,32 @@ function formatCompileError(command: string, err: unknown): string {
   const fallback = err instanceof Error ? err.message : String(err);
   const maybe = err as { stderr?: string; stdout?: string };
   const combined = `${maybe?.stderr ?? ""}\n${maybe?.stdout ?? ""}`.trim();
-  if (!combined) {
-    return `${command} failed: ${fallback}`;
-  }
+  if (!combined) return `${command} failed: ${fallback}`;
 
   const lines = combined
     .replace(/\r\n/g, "\n")
     .split("\n")
-    .map((l) => l.trim())
+    .map((line) => line.trim())
     .filter(Boolean);
+
   const tail = lines.slice(-12).join(" | ");
   return `${command} failed. Check main.log. ${tail}`;
+}
+
+async function findFreePort(startPort: number): Promise<number> {
+  for (let port = startPort; port < startPort + 100; port += 1) {
+    try {
+      const tmp = BunRuntime?.serve({
+        port,
+        hostname: "127.0.0.1",
+        fetch: () => new Response("ok"),
+      });
+      tmp.stop(true);
+      return port;
+    } catch {
+      // try next port
+    }
+  }
+
+  throw new Error(`No free port found in range ${startPort}-${startPort + 99}`);
 }
