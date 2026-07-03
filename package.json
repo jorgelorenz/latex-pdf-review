@@ -1,0 +1,34 @@
+{
+  "name": "latex-pdf-review",
+  "version": "0.1.0",
+  "description": "OpenCode plugin: PDF ↔ LaTeX synchronized review via SyncTeX",
+  "type": "module",
+  "main": "plugin.ts",
+  "scripts": {
+    "build:ui": "bun build ui/App.tsx --outfile ui/app.js --target browser --format esm --external react --external react-dom",
+    "build": "bun build plugin.ts --outfile dist/plugin.js --target bun",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.1.10",
+    "esbuild": "^0.21.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "bun": ">=1.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "latex",
+    "pdf",
+    "review",
+    "synctex"
+  ],
+  "license": "MIT"
+}
