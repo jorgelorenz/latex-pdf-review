@@ -50,6 +50,6 @@ jobs:
         run: |
           echo "GITHUB_REF=$GITHUB_REF"
           echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
-          
+
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish --access public --verbose
