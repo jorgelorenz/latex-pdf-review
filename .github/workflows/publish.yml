@@ -1,10 +1,10 @@
 name: Publish npm package
 
 on:
-  release:
-    types:
-      - created
-
+  push:
+    tags:
+      - "v*"
+      
 permissions:
   contents: read
   id-token: write
