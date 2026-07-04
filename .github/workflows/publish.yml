@@ -52,4 +52,4 @@ jobs:
           echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
 
       - name: Publish to npm
-        run: npm publish --access public --verbose
+        run: npm publish --access public --verbose --provenance
