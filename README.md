@@ -95,7 +95,7 @@ PDF found but no SyncTeX mapping:
 - Recompile with `--synctex=1`
 - Confirm `.synctex.gz` exists next to the PDF
 
-Browser UI does not open automatically:
+Browser UI doesn't open automatically:
 
 - Copy the URL from the OpenCode toast and open it manually
 
