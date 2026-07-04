@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - "v*"
-      
+
 permissions:
   contents: read
   id-token: write
@@ -46,5 +46,10 @@ jobs:
       # - name: Test
       #   run: bun test
 
+      - name: Verify OIDC identity
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
+          
       - name: Publish to npm
         run: npm publish --access public
