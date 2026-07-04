@@ -99,7 +99,13 @@ function generateId(): string {
 // API helpers
 // ---------------------------------------------------------------------------
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(path, opts);
+  const sessionToken = new URLSearchParams(window.location.search).get("session");
+  const headers = new Headers(opts?.headers ?? {});
+  if (sessionToken) {
+    headers.set("X-Latex-Review-Session", sessionToken);
+  }
+
+  const res = await fetch(path, { ...opts, headers });
   const json = await res.json();
   if (!res.ok) throw new Error((json as { error?: string }).error ?? res.statusText);
   return json as T;

@@ -57,6 +57,7 @@ const PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min
 const PDFJS_WORKER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
 
 const RENDER_SCALE = 1.6; // Higher = sharper but slower
+const SESSION_TOKEN = new URLSearchParams(window.location.search).get("session") ?? "";
 
 // ---------------------------------------------------------------------------
 // Coordinate conversion utilities
@@ -163,7 +164,7 @@ export function PdfPane() {
         // The server exposes the PDF via /api/file?path=... (read as binary)
         // For simplicity we serve the raw PDF directly.
         // The server.ts will be updated to serve raw PDF bytes at /pdf.
-        const pdfUrl = `/pdf?path=${encodeURIComponent(pdfPath)}&v=${pdfVersion}`;
+        const pdfUrl = `/pdf?path=${encodeURIComponent(pdfPath)}&v=${pdfVersion}&session=${encodeURIComponent(SESSION_TOKEN)}`;
 
         const loadTask = pdfjsLib.getDocument({ url: pdfUrl, workerSrc: PDFJS_WORKER_CDN });
         const doc = await loadTask.promise;

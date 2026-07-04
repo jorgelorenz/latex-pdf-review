@@ -1,78 +1,41 @@
-/**
- * plugin.ts
- *
- * OpenCode plugin entry point for latex-pdf-review.
- *
- * Registers the /latex-pdf-review slash command via the
- * `command.execute.before` hook (same pattern as plannotator opencode-plugin).
- *
- * Flow:
- *   1. User types /latex-pdf-review [optional-path.pdf]
- *   2. Hook fires → suppress .md body (output.parts.length = 0)
- *   3. Resolve PDF path (arg > auto-detect main.pdf)
- *   4. Start local Bun HTTP server
- *   5. Open browser to the split-pane UI
- *   6. Show TUI toast with the URL
- *   7. Server holds the OpenCode client and session ID for review submission
- */
-
 import type { Plugin } from "@opencode-ai/plugin";
 import { join, resolve, extname, basename, dirname } from "node:path";
 import { existsSync, readdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { startServer, type StartedServer } from "./server.ts";
 
-// ---------------------------------------------------------------------------
-// Plugin factory
-// ---------------------------------------------------------------------------
+const execFileAsync = promisify(execFile);
+const BunRuntime = globalThis.Bun as any;
 
 const LatexPdfReviewPlugin: Plugin = async (ctx) => {
-  // Track running servers so we can clean them up on session end
   const runningServers = new Map<string, StartedServer>();
 
   return {
-    // -----------------------------------------------------------------------
-    // Command interception — mirrors plannotator's command.execute.before pattern
-    // -----------------------------------------------------------------------
     "command.execute.before": async (input, output) => {
       if (input.command !== "latex-pdf-review") return;
 
-      // 1. Suppress the .md stub body from reaching the agent
-      //    (Must mutate in-place — do NOT reassign output.parts)
       output.parts.length = 0;
 
       const sessionId = input.sessionID;
 
-      // 2. Resolve the PDF path
-       let pdfPath: string;
-       try {
-         pdfPath = resolvePdfPath(input.arguments?.trim() ?? "", ctx.directory);
-       } catch (err: unknown) {
-         const msg = err instanceof Error ? err.message : String(err);
-         await safeShowToast(ctx.client, `latex-pdf-review: ${msg}`, "error");
-         return;
-       }
-
-      // 2.5. Auto-compile if SyncTeX is missing
+      let pdfPath: string;
       try {
-        await ensureSynctex(pdfPath, ctx.directory, ctx.$);
+        pdfPath = resolvePdfPath(input.arguments?.trim() ?? "", ctx.directory);
+        await validateStartupRequirements(pdfPath);
+        await ensureSynctex(pdfPath);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        await safeShowToast(
-          ctx.client,
-          `latex-pdf-review: auto-compile warning — ${msg}`,
-          "info"
-        );
-        // Don't fail — let SyncTeX operations fail gracefully later if needed
+        await safeShowToast(ctx.client, `latex-pdf-review: ${msg}`, "error");
+        return;
       }
 
-      // 3. Stop any previously running server for this session
       const existing = runningServers.get(sessionId);
       if (existing) {
         existing.close();
         runningServers.delete(sessionId);
       }
 
-      // 4. Start the local server
       let server: StartedServer;
       try {
         server = await startServer({
@@ -93,40 +56,33 @@ const LatexPdfReviewPlugin: Plugin = async (ctx) => {
 
       runningServers.set(sessionId, server);
 
-      // 5. Open browser (cross-platform)
-      const { url } = server;
+      const { browserUrl } = server;
       try {
-        await openBrowser(url, ctx.$);
+        await openBrowser(browserUrl);
       } catch {
-        // Browser open failure is non-fatal — user can navigate manually
+        // non-fatal
       }
 
-      // 6. Show TUI toast with the URL
       await safeShowToast(
         ctx.client,
-        `latex-pdf-review opened at ${url}`,
+        `latex-pdf-review opened at ${browserUrl}`,
         "success"
       );
 
-      // 7. Log to OpenCode app log
       try {
         await ctx.client.app.log({
           body: {
             service: "latex-pdf-review",
             level: "info",
             message: "Review session started",
-            extra: { url, pdfPath, sessionId },
+            extra: { url: browserUrl, pdfPath, sessionId },
           },
         });
       } catch {
-        // Non-fatal
+        // non-fatal
       }
-
     },
 
-    // -----------------------------------------------------------------------
-    // Clean up servers when the session ends
-    // -----------------------------------------------------------------------
     event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
       if (event.type === "session.idle") {
         const sessionId = event.properties?.sessionID as string | undefined;
@@ -135,20 +91,28 @@ const LatexPdfReviewPlugin: Plugin = async (ctx) => {
         if (!server) return;
 
         try {
-          const statusRes = await fetch(`${server.url}/api/status`);
+          const statusRes = await fetch(`${server.url}/api/status`, {
+            headers: { "X-Latex-Review-Session": server.sessionToken },
+          });
           if (!statusRes.ok) return;
           const status = (await statusRes.json()) as { isAgentBusy: boolean };
           if (!status.isAgentBusy) return;
 
           await fetch(`${server.url}/api/agent/busy`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Latex-Review-Session": server.sessionToken,
+            },
             body: JSON.stringify({ busy: false }),
           });
 
           await fetch(`${server.url}/api/compile`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Latex-Review-Session": server.sessionToken,
+            },
             body: "{}",
           });
 
@@ -158,7 +122,7 @@ const LatexPdfReviewPlugin: Plugin = async (ctx) => {
             "success"
           );
         } catch {
-          // Non-fatal
+          // non-fatal
         }
       }
 
@@ -178,26 +142,22 @@ const LatexPdfReviewPlugin: Plugin = async (ctx) => {
 
 export default LatexPdfReviewPlugin;
 
-// ---------------------------------------------------------------------------
-// Auto-compile with SyncTeX
-// ---------------------------------------------------------------------------
+async function validateStartupRequirements(pdfPath: string): Promise<void> {
+  if (!BunRuntime?.serve) {
+    throw new Error(
+      "Bun runtime is required. OpenCode plugins run on Bun, but Bun was not detected in this process."
+    );
+  }
 
-/**
- * Ensure that a PDF has SyncTeX data (.synctex.gz).
- * If missing, automatically compile the source .tex file with --synctex=1.
- *
- * @param pdfPath Absolute path to the PDF
- * @param directory Project directory
- * @param $ Bun shell ($) for running commands
- * @throws if compilation fails
- */
-async function ensureSynctex(
-  pdfPath: string,
-  directory: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  $: any
-): Promise<void> {
-  // Check if .synctex.gz exists
+  await assertCommandAvailable("bun");
+  await assertCommandAvailable("synctex");
+
+  if (!existsSync(pdfPath)) {
+    throw new Error(`PDF not found: ${pdfPath}`);
+  }
+}
+
+async function ensureSynctex(pdfPath: string): Promise<void> {
   const pdfName = basename(pdfPath);
   const pdfDir = dirname(pdfPath);
   const synctexGz = join(pdfDir, pdfName.replace(/\.pdf$/i, ".synctex.gz"));
@@ -208,54 +168,47 @@ async function ensureSynctex(
     return;
   }
 
-  // SyncTeX missing — try to compile the source .tex file
   const texName = pdfName.replace(/\.pdf$/i, ".tex");
   const texPath = join(pdfDir, texName);
 
   if (!existsSync(texPath)) {
-    throw new Error(`SyncTeX file missing and source .tex not found: ${texPath}`);
+    throw new Error(
+      `SyncTeX data is missing for ${pdfName} and source file was not found (${texPath}). ` +
+        "Compile the PDF with --synctex=1."
+    );
   }
 
-  // Try pdflatex first, then latexmk (non-interactive)
   try {
-    // Use pdflatex with --synctex=1 and non-interactive mode, suppress output
-    await $`cd ${pdfDir} && pdflatex --synctex=1 --interaction=batchmode ${texName} > /dev/null 2>&1`;
+    await execFileAsync("pdflatex", ["--synctex=1", "--interaction=nonstopmode", texName], {
+      cwd: pdfDir,
+      timeout: 180000,
+    });
     if (!existsSync(synctexGz) && !existsSync(synctex)) {
       throw new Error("pdflatex compiled but no .synctex file was generated");
     }
   } catch {
-    // If pdflatex fails, try latexmk
     try {
-      await $`cd ${pdfDir} && latexmk -pdf -synctex=1 -interaction=batchmode ${texName} > /dev/null 2>&1`;
+      await execFileAsync("latexmk", ["-pdf", "-synctex=1", "-interaction=nonstopmode", texName], {
+        cwd: pdfDir,
+        timeout: 240000,
+      });
       if (!existsSync(synctexGz) && !existsSync(synctex)) {
         throw new Error("latexmk compiled but no .synctex file was generated");
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+    } catch {
       throw new Error(
-        `Failed to auto-compile ${texName}. Make sure pdflatex or latexmk is installed.`
+        `Could not generate SyncTeX for ${texName}. Install LaTeX tooling and compile with --synctex=1.`
       );
     }
   }
 }
 
-// ---------------------------------------------------------------------------
-// PDF path resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the PDF path to review.
- * Priority order:
- *   1. Explicit argument passed by the user
- *   2. `main.pdf` in the project directory
- *   3. Any single *.pdf file in the project directory
- *
- * @throws if no PDF can be found
- */
 function resolvePdfPath(argument: string, directory: string): string {
-  // 1. Explicit argument
   if (argument) {
     const candidate = resolve(directory, argument);
+    if (!isPathInside(candidate, directory)) {
+      throw new Error("PDF path must be inside the current workspace directory");
+    }
     if (!existsSync(candidate)) {
       throw new Error(`PDF not found: ${candidate}`);
     }
@@ -265,11 +218,9 @@ function resolvePdfPath(argument: string, directory: string): string {
     return candidate;
   }
 
-  // 2. main.pdf in project root
   const mainPdf = join(directory, "main.pdf");
   if (existsSync(mainPdf)) return mainPdf;
 
-  // 3. Any single PDF in the project root
   try {
     const pdfs = readdirSync(directory)
       .filter((f) => extname(f).toLowerCase() === ".pdf")
@@ -295,43 +246,67 @@ function resolvePdfPath(argument: string, directory: string): string {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Cross-platform browser opener
-// ---------------------------------------------------------------------------
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function openBrowser(url: string, $: any): Promise<void> {
+async function openBrowser(url: string): Promise<void> {
   const platform = process.platform;
-  try {
-    if (platform === "win32") {
-      // Windows: cmd /c start handles URLs with & and ? correctly
-      await $`cmd /c start "" ${url}`;
-    } else if (platform === "darwin") {
-      // macOS
-      await $`open ${url}`;
-    } else {
-      // Linux / WSL
-      await $`xdg-open ${url}`;
+  if (platform === "win32") {
+    await execFileAsync("cmd", ["/c", "start", "", url]);
+    return;
+  }
+
+  if (platform === "darwin") {
+    await execFileAsync("open", [url]);
+    return;
+  }
+
+  if (process.env.WSL_DISTRO_NAME) {
+    try {
+      await execFileAsync("wslview", [url]);
+      return;
+    } catch {
+      // fall through
     }
+  }
+
+  await execFileAsync("xdg-open", [url]);
+}
+
+async function assertCommandAvailable(command: string): Promise<void> {
+  const lookupCommand = process.platform === "win32" ? "where" : "which";
+  try {
+    await execFileAsync(lookupCommand, [command], { timeout: 8000 });
   } catch {
-    // Best-effort — user can open URL manually from the TUI toast
+    if (command === "synctex") {
+      throw new Error(
+        "SyncTeX was not found on PATH. Install TeX Live or MiKTeX, then verify with `synctex --version`."
+      );
+    }
+    if (command === "bun") {
+      throw new Error("Bun executable was not found on PATH. Install Bun and restart OpenCode.");
+    }
+    throw new Error(`Required command not found: ${command}`);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Safe TUI toast
-// ---------------------------------------------------------------------------
+function isPathInside(targetPath: string, rootPath: string): boolean {
+  const normalizedTarget = resolve(targetPath);
+  const normalizedRoot = resolve(rootPath);
+  const target = process.platform === "win32" ? normalizedTarget.toLowerCase() : normalizedTarget;
+  const root = process.platform === "win32" ? normalizedRoot.toLowerCase() : normalizedRoot;
+  if (target === root) return true;
+  const separator = root.endsWith("/") || root.endsWith("\\") ? "" : process.platform === "win32" ? "\\" : "/";
+  return target.startsWith(root + separator);
+}
 
 async function safeShowToast(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  client: any,
+  client: unknown,
   message: string,
   variant: "success" | "error" | "info" = "info"
 ): Promise<void> {
+  if (!client || typeof client !== "object") return;
+  const maybeClient = client as { tui?: { showToast?: (input: { body: { message: string; variant: string } }) => Promise<void> } };
   try {
-    await client.tui.showToast({ body: { message, variant } });
+    await maybeClient.tui?.showToast?.({ body: { message, variant } });
   } catch {
-    // TUI might not be available (headless mode) — ignore
     if (variant === "error") {
       console.error(`[latex-pdf-review] ${message}`);
     }

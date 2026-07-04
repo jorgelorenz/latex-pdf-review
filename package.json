@@ -1,34 +1,74 @@
 {
-  "name": "latex-pdf-review",
-  "version": "0.1.0",
-  "description": "OpenCode plugin: PDF ↔ LaTeX synchronized review via SyncTeX",
+  "name": "@jorgelorenz/opencode-latex-pdf-review",
+  "version": "1.0.0",
+  "description": "OpenCode plugin for synchronized LaTeX <-> PDF review with SyncTeX",
   "type": "module",
-  "main": "plugin.ts",
-  "scripts": {
-    "build:ui": "bun build ui/App.tsx --outfile ui/app.js --target browser --format esm --external react --external react-dom",
-    "build": "bun build plugin.ts --outfile dist/plugin.js --target bun",
-    "type-check": "tsc --noEmit"
+  "license": "MIT",
+  "author": "Jorge Lorenzo Garcia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jorgelorenz/latex-pdf-review.git"
   },
-  "dependencies": {
-    "@opencode-ai/plugin": "^1.1.10",
-    "esbuild": "^0.21.0"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "typescript": "^5"
-  },
-  "peerDependencies": {
-    "bun": ">=1.0.0"
+  "homepage": "https://github.com/jorgelorenz/latex-pdf-review#readme",
+  "bugs": {
+    "url": "https://github.com/jorgelorenz/latex-pdf-review/issues"
   },
   "keywords": [
     "opencode",
+    "opencode-plugin",
     "latex",
     "pdf",
-    "review",
-    "synctex"
+    "synctex",
+    "review"
   ],
-  "license": "MIT"
+  "exports": {
+    ".": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "build": "bun run build:clean && bun run build:ui && bun run build:copy-ui-html && bun run build:plugin && bun run build:types",
+    "build:clean": "bun run ./scripts/clean.ts",
+    "build:ui": "bun build ./ui/App.tsx --outfile ./dist/ui/app.js --target browser --format esm --external react --external react-dom --external react-dom/client",
+    "build:copy-ui-html": "bun run ./scripts/copy-ui-html.ts",
+    "build:plugin": "bun build ./plugin.ts --outfile ./dist/plugin.js --target bun --format esm --external @opencode-ai/plugin",
+    "build:types": "tsc --emitDeclarationOnly --declaration --declarationMap false --outDir dist",
+    "test": "bun --eval \"console.log('No automated tests yet')\"",
+    "prepare": "bun run build"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.1.10"
+  },
+  "peerDependencies": {
+    "bun": ">=1.2.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.0",
+    "@types/node": "^20.17.57",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "bun-types": "^1.2.18",
+    "eslint": "^9.30.0",
+    "globals": "^15.8.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.36.0"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
