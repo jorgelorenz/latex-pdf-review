@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.5](https://github.com/jorgelorenz/latex-pdf-review/compare/v1.0.4...v1.0.5) (2026-07-04)
+
+
+### Bug Fixes
+
+* publish ([fd58c49](https://github.com/jorgelorenz/latex-pdf-review/commit/fd58c4946b061f48cf2be9204c0f7848dddcd67d))
+
 ## [1.0.4](https://github.com/jorgelorenz/latex-pdf-review/compare/v1.0.3...v1.0.4) (2026-07-04)
 
 
