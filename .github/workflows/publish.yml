@@ -1,9 +1,11 @@
 name: Publish npm package
 
 on:
-  push:
-    tags:
-      - "v*"
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
 
 permissions:
   contents: read
@@ -11,6 +13,10 @@ permissions:
 
 jobs:
   publish:
+    if: |
+      github.event.pull_request.merged == true && 
+      startsWith(github.head_ref, 'v')
+
     runs-on: ubuntu-latest
 
     environment: npm-publish
@@ -28,7 +34,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -45,13 +50,6 @@ jobs:
       # Enable when test exists
       # - name: Test
       #   run: bun test
-
-      - name: Verify OIDC identity
-        run: |
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
-          echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
-          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
 
       - run: node -p "require('./package.json').version"
 
