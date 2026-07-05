@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.10](https://github.com/jorgelorenz/latex-pdf-review/compare/v1.0.9...v1.0.10) (2026-07-05)
+
+
+### Bug Fixes
+
+* release ([a062b67](https://github.com/jorgelorenz/latex-pdf-review/commit/a062b6732791bb897661e7bd63c3f1d2b891f0a0))
+* release ([16e2381](https://github.com/jorgelorenz/latex-pdf-review/commit/16e23814dd6c77a33b55ec40a4e88ef79818c9c7))
+
 ## [1.0.9](https://github.com/jorgelorenz/latex-pdf-review/compare/v1.0.8...v1.0.9) (2026-07-05)
 
 
