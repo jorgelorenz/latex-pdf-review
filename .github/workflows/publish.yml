@@ -52,13 +52,17 @@ jobs:
       # - name: Test
       #   run: bun test
 
-      - name: Fix npm CLI bug
+      - name: Upgrade npm to a stable version
+        run: npm install -g npm@latest
+
+      - name: Clean npm configs
         run: |
           rm -f .npmrc
           rm -f ~/.npmrc
+          rm -f ../_temp/.npmrc || true
 
       - name: Publish to npm
-        run: npm publish --access public --verbose --provenance
+        run: npm publish --access public --verbose --provenance --registry=https://registry.npmjs.org/
         env:
           NPM_CONFIG_AUDIENCE: https://registry.npmjs.org
 
