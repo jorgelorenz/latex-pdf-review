@@ -12,6 +12,15 @@ const LatexPdfReviewPlugin: Plugin = async (ctx) => {
   const runningServers = new Map<string, StartedServer>();
 
   return {
+    config: async (cfg) => {
+      cfg.command = cfg.command ?? {};
+      cfg.command["latex-pdf-review"] = {
+        description: "Open synchronized LaTeX ↔ PDF review viewer (SyncTeX)",
+        template:
+          "Open the LaTeX PDF review panel$ARGUMENTS",
+      };
+    },
+
     "command.execute.before": async (input, output) => {
       if (input.command !== "latex-pdf-review") return;
 
