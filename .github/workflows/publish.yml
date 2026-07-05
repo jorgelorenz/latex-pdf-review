@@ -52,7 +52,10 @@ jobs:
       # - name: Test
       #   run: bun test
 
-      - run: node -p "require('./package.json').version"
+      - name: Fix npm CLI bug
+        run: |
+          rm -f .npmrc
+          rm -f ~/.npmrc
 
       - name: Publish to npm
         run: npm publish --access public --verbose --provenance
