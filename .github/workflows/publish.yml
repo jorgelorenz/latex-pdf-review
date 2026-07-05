@@ -1,11 +1,9 @@
 name: Publish npm package
 
 on:
-  pull_request:
+  push:
     branches:
       - main
-    types:
-      - closed
 
 permissions:
   contents: read
@@ -15,7 +13,7 @@ jobs:
   publish:
     if: |
       github.event.pull_request.merged == true && 
-      startsWith(github.head_ref, 'v')
+      startsWith(github.head_ref, 'release-please')
 
     runs-on: ubuntu-latest
 
