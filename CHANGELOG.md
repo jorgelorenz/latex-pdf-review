@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/jorgelorenz/latex-pdf-review/compare/v1.0.16...v1.1.0) (2026-07-05)
+
+
+### Features
+
+* new input page ([870d62a](https://github.com/jorgelorenz/latex-pdf-review/commit/870d62a9d0e7fa21d524c1f203bfd90c60f60a2f))
+* new input page ([46b0e6c](https://github.com/jorgelorenz/latex-pdf-review/commit/46b0e6c2db82280ce81cd475c421e9b01947a84e))
+
 ## [1.0.16](https://github.com/jorgelorenz/latex-pdf-review/compare/v1.0.15...v1.0.16) (2026-07-05)
 
 
