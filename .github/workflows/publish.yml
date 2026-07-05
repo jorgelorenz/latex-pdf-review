@@ -13,7 +13,7 @@ jobs:
   publish:
     if: |
       github.event.pull_request.merged == true && 
-      startsWith(github.head_ref, 'release-please')
+      contains(github.head_ref, 'release-please')
 
     runs-on: ubuntu-latest
 
