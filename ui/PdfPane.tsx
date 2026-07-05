@@ -260,11 +260,26 @@ export function PdfPane() {
   );
 
   // ── Page navigation ──────────────────────────────────────────────────────
+  const [pageInputValue, setPageInputValue] = useState("1");
+
+  useEffect(() => {
+    setPageInputValue(String(currentPage));
+  }, [currentPage]);
+
   const goToPrev = useCallback(() => setCurrentPage((p) => Math.max(1, p - 1)), []);
   const goToNext = useCallback(
     () => setCurrentPage((p) => Math.min(totalPages, p + 1)),
     [totalPages]
   );
+
+  const handlePageInputCommit = useCallback(() => {
+    const n = parseInt(pageInputValue, 10);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) {
+      setCurrentPage(n);
+    } else {
+      setPageInputValue(String(currentPage));
+    }
+  }, [pageInputValue, totalPages, currentPage]);
 
   // Jump to the page of reverseSyncHighlight when it changes
   useEffect(() => {
@@ -291,6 +306,29 @@ export function PdfPane() {
           >
             ›
           </button>
+          <input
+            type="number"
+            min={1}
+            max={totalPages || 1}
+            value={pageInputValue}
+            disabled={totalPages === 0}
+            onChange={(e) => setPageInputValue(e.target.value)}
+            onBlur={handlePageInputCommit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handlePageInputCommit();
+              if (e.key === "Escape") setPageInputValue(String(currentPage));
+            }}
+            style={{
+              width: 44,
+              textAlign: "center",
+              background: "#0d1117",
+              border: "1px solid #30363d",
+              borderRadius: 4,
+              color: "#e6edf3",
+              fontSize: 11,
+              padding: "2px 4px",
+            }}
+          />
         </div>
       </div>
 
