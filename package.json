@@ -1,6 +1,6 @@
 {
   "name": "@jorgelorenz/opencode-latex-pdf-review",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "OpenCode plugin for synchronized LaTeX <-> PDF review with SyncTeX",
   "type": "module",
   "license": "MIT",
